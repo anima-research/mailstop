@@ -1,0 +1,15 @@
+[Unit]
+Description=mailstop - receiving-only SMTP (Maildir on local disk)
+After=network.target
+
+[Service]
+User=alice
+Environment=MAILSTOP_DOMAIN=example.org
+Environment=MAILSTOP_USERS=alice,postmaster
+Environment=MAILSTOP_ROOT=/home/alice/mail
+ExecStart=/usr/bin/python3 /opt/mailstop/mailstop.py
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+{
+ "name": "mail-mcpl",
+ "version": "0.1.0",
+ "description": "MCPL server over a local Maildir (companion to mailstop). Read-only mail tools + push on arrival.",
+ "type": "module",
+ "bin": {
+  "mail-mcpl": "dist/index.js"
+ },
+ "scripts": {
+  "build": "tsc"
+ },
+ "dependencies": {
+  "@connectome/mcpl-core": "file:../../mcpl-core-ts",
+  "ws": "^8.18.0",
+  "smol-toml": "^1.3.0"
+ },
+ "devDependencies": {
+  "typescript": "^5.5.0",
+  "@types/node": "^22",
+  "@types/ws": "^8"
+ }
+}
