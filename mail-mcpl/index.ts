@@ -44,10 +44,10 @@
  * Config (env): MAILMCPL_ROOT (default ~/mail), MAILMCPL_TOKEN,
  *               MAILMCPL_MAX_BODY (chars of body returned, default 20000)
  */
-import { McplConnection } from '@connectome/mcpl-core';
+import { McplConnection, method } from '@connectome/mcpl-core';
 import type {
   FeatureSetDeclaration, McplCapabilities, McplInitializeParams,
-  McplInitializeResult, InitializeCapabilities, JsonRpcId,
+  McplInitializeResult, InitializeCapabilities, PushEventParams, JsonRpcId,
 } from '@connectome/mcpl-core';
 import { existsSync, readdirSync, readFileSync, renameSync, statSync, watch, writeFileSync } from 'node:fs';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
@@ -340,12 +340,20 @@ class MailServer {
       return;
     }
     const tail = silent > 0 ? ` (+${silent} more from senders not on your wake list)` : '';
-    try {
-      conn.sendNotification('mcpl/pushEvent', {
-        featureSet: FS_NAME,
-        event: { type: 'text', text: `[mail] ${wakeLines.join('; ')}${tail}. Use mail_list / mail_read.` },
-      });
-    } catch (e) { log('push failed:', (e as Error).message); }
+    // Push genre copied from heartbeat-mcpl's emitPush (the working neighbor;
+    // first version invented its own notification shape and the host silently
+    // dropped it — field bug 2026-07-13, found by the resident's 40-minute-late
+    // letter): a REQUEST with PushEventParams, not a notification.
+    const params: PushEventParams = {
+      featureSet: FS_NAME,
+      eventId: `mail_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: new Date().toISOString(),
+      origin: { source: 'mail', senders: wakeLines.length },
+      payload: { content: [{ type: 'text', text: `[mail] ${wakeLines.join('; ')}${tail}. Use mail_list / mail_read.` }] },
+    };
+    conn.sendRequest(method.PUSH_EVENT, params)
+      .then((r) => log('push response:', JSON.stringify(r)))
+      .catch((e) => log('push failed:', (e as Error).message));
   }
 
   private text(t: string, isError?: boolean) {
