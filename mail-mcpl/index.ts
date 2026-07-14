@@ -49,7 +49,7 @@ import type {
   FeatureSetDeclaration, McplCapabilities, McplInitializeParams,
   McplInitializeResult, InitializeCapabilities, PushEventParams, JsonRpcId,
 } from '@connectome/mcpl-core';
-import { existsSync, readdirSync, readFileSync, renameSync, statSync, watch, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
@@ -57,9 +57,18 @@ import { homedir } from 'node:os';
 const ROOT = (process.env.MAILMCPL_ROOT ?? join(homedir(), 'mail'));
 const MAX_BODY = Number(process.env.MAILMCPL_MAX_BODY ?? 20000);
 const CONTACTS_PATH = process.env.MAILMCPL_CONTACTS ?? join(homedir(), 'contacts.toml');
+const POLL_MS = Number(process.env.MAILMCPL_POLL_MS ?? 5000);
+const LOG_PATH = process.env.MAILMCPL_LOG ?? join(ROOT, '.mailmcpl.log');
 const FS_NAME = 'mail';
 
 function log(...a: unknown[]): void { console.error('[mail-mcpl]', ...a); }
+/** Durable, visible activity log — conhost may not forward a stdio child's
+ *  stderr to the journal, so wake/push activity is written to a file we own.
+ *  (Debugging blind was the reason the 2026-07-13 doorbell bug took two passes.) */
+function fileLog(msg: string): void {
+  try { appendFileSync(LOG_PATH, `${new Date().toISOString()} ${msg}\n`); } catch { /* never throw */ }
+  log(msg);
+}
 
 // ---------------------------------------------------------------------------
 // Contact book (contacts.toml)
@@ -253,14 +262,13 @@ interface ReqMsg { id: JsonRpcId; method: string; params?: unknown; }
 
 class MailServer {
   private conn: McplConnection | null = null;
-  private watchers: Array<ReturnType<typeof watch>> = [];
-  private pushDebounce: ReturnType<typeof setTimeout> | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
   private mcplEnabled = false;
 
   async serve(conn: McplConnection): Promise<void> {
     this.conn = conn;
     await this.init();
-    this.watchNew();
+    this.startPolling();
     try {
       while (!conn.isClosed) {
         const msg = await conn.nextMessage();
@@ -269,9 +277,7 @@ class MailServer {
     } catch (e) {
       if ((e as Error).name !== 'ConnectionClosedError') log('connection error:', e);
     }
-    for (const w of this.watchers) w.close();
-    this.watchers = [];
-    if (this.pushDebounce) clearTimeout(this.pushDebounce);
+    if (this.pollTimer) clearInterval(this.pollTimer);
     this.conn = null;
   }
 
@@ -291,22 +297,18 @@ class MailServer {
     }
   }
 
-  /** Wake the agent when mail lands: watch each user's new/ directory. */
-  private watchNew(): void {
-    for (const user of users()) {
-      try {
-        const w = watch(join(ROOT, user, 'new'), (event, filename) => {
-          if (event !== 'rename' || !filename || filename.startsWith('.')) return;
-          if (!existsSync(join(ROOT, user, 'new', filename))) return; // removal, not arrival
-          // debounce bursts into one push
-          if (this.pushDebounce) clearTimeout(this.pushDebounce);
-          this.pushDebounce = setTimeout(() => this.pushNewMail(), 1500);
-        });
-        this.watchers.push(w);
-      } catch (e) {
-        log(`watch failed for ${user}:`, (e as Error).message);
-      }
-    }
+  /** Wake the agent when mail lands: POLL each user's new/ directory.
+   *  fs.watch was unreliable here — mailstop delivers via os.replace (rename
+   *  into new/), and rename-into-a-watched-dir does not fire a usable event on
+   *  every filesystem, so mail arrived but never woke the agent (field bug
+   *  2026-07-13). A short readdir poll is filesystem-agnostic and cheap. */
+  private startPolling(): void {
+    // Seed `announced` with whatever is already in new/ at startup, so a
+    // restart does not re-wake the agent for mail it has already seen. Only
+    // arrivals AFTER startup wake it.
+    for (const u of users()) for (const f of listBox(u, 'new')) this.announced.add(`${u}/${f}`);
+    fileLog(`polling started; seeded ${this.announced.size} existing message(s), interval ${POLL_MS}ms`);
+    this.pollTimer = setInterval(() => this.pushNewMail(), POLL_MS);
   }
 
   private announced = new Set<string>();
@@ -336,9 +338,10 @@ class MailServer {
       }
     }
     if (wakeLines.length === 0) {
-      if (silent > 0) log(`${silent} new message(s) accumulated silently (no wake-listed sender)`);
+      if (silent > 0) fileLog(`${silent} new message(s) accumulated silently (no wake-listed sender)`);
       return;
     }
+    fileLog(`waking: ${wakeLines.join('; ')}${silent > 0 ? ` (+${silent} silent)` : ''}`);
     const tail = silent > 0 ? ` (+${silent} more from senders not on your wake list)` : '';
     // Push genre copied from heartbeat-mcpl's emitPush (the working neighbor;
     // first version invented its own notification shape and the host silently
@@ -352,8 +355,8 @@ class MailServer {
       payload: { content: [{ type: 'text', text: `[mail] ${wakeLines.join('; ')}${tail}. Use mail_list / mail_read.` }] },
     };
     conn.sendRequest(method.PUSH_EVENT, params)
-      .then((r) => log('push response:', JSON.stringify(r)))
-      .catch((e) => log('push failed:', (e as Error).message));
+      .then((r) => fileLog(`push delivered: ${JSON.stringify(r)}`))
+      .catch((e) => fileLog(`push failed: ${(e as Error).message}`));
   }
 
   private text(t: string, isError?: boolean) {
