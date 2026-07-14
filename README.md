@@ -122,12 +122,48 @@ MAILMCPL_TOKEN=... node dist/index.js --port 7526 --bind 127.0.0.1
 
 Env: `MAILMCPL_ROOT` (default `~/mail`), `MAILMCPL_CONTACTS` (default
 `~/contacts.toml`), `MAILMCPL_MAX_BODY` (default 20000 chars),
-`MAILMCPL_TOKEN` (ws auth).
+`MAILMCPL_POLL_MS` (new-mail poll interval, default 5000),
+`MAILMCPL_TOKEN` (ws auth), `MAILMCPL_LOG` (activity log, default
+`<root>/.mailmcpl.log`).
 
 Note: `@connectome/mcpl-core` is consumed as `file:../mcpl-core-ts` — the
 ecosystem's sibling-checkout convention. Clone
 [mcpl-core-ts](https://github.com/anima-research/mcpl-core-ts) next to this
 repo before `npm install`.
+
+### Wiring into a Connectome recipe (READ THIS — wakes fail silently otherwise)
+
+A stdio entry in the agent's recipe `mcpServers`:
+
+```json
+"mail": {
+  "command": "node",
+  "args": ["/abs/path/to/mail-mcpl/dist/index.js", "--stdio"],
+  "env": { "MAILMCPL_ROOT": "/home/agent/mail" },
+  "enabledFeatureSets": ["mail"]
+}
+```
+
+**`enabledFeatureSets: ["mail"]` is required for the doorbell to ring.** This
+is the trap that cost us three debugging passes: an entry with no
+`enabledFeatureSets` gets its **tools** working (mail_status/list/read all
+respond — tool access isn't gated) but its **push events silently rejected**
+by the host (`Feature set not enabled: mail`), because feature sets default to
+disabled unless listed. Tools work, wakes don't, and nothing says why. If mail
+arrives (visible via `mail_status`) but never wakes the agent, check this line
+first.
+
+Two more links in the wake chain, for the same debugging session's sake:
+- the server emits pushes as an MCPL **request** (`method.PUSH_EVENT` with
+  `PushEventParams`), not a bespoke notification — a hand-rolled notification
+  shape is silently dropped by the host;
+- new mail is detected by **polling** `new/`, not `fs.watch` — `fs.watch` misses
+  deliveries done via `os.replace` (rename into the watched dir) on many
+  filesystems, so mail lands but never triggers a wake.
+
+The `~/mail/.mailmcpl.log` file is your friend: it records every poll seed,
+wake, and push verdict (`accepted:true` / the rejection reason), because a
+conhost stdio child's stderr may not reach the journal.
 
 ## Sending
 

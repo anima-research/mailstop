@@ -1,5 +1,8 @@
 # STATE
 
+- 2026-07-14: DOORBELL CONFIRMED live (push accepted:true, Fen woke). All three
+  layers fixed. Reachable by mail without courier.
+
 - 2026-07-14: doorbell fixed properly — fs.watch replaced with readdir polling
   (fs.watch missed os.replace deliveries; mail arrived but never woke). Startup
   seeds the announced-set so restart doesn't re-wake old mail. Added fileLog
