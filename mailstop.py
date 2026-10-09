@@ -62,6 +62,50 @@ except ImportError:
 
 GREYLIST_PASS_AFTER = 60       # seconds an unknown triple must wait before retry counts
 GREYLIST_REMEMBER = 35 * 86400  # seconds a passed sender stays known
+DEDUP_REMEMBER = 7 * 86400      # seconds a Message-ID stays known (MAILSTOP_DEDUP_DAYS)
+
+
+class SeenMessageIds:
+    """Persisted Message-ID memory. Some senders redeliver an accepted message in fresh
+    SMTP sessions (Google's DMARC aggregate reports: same Report-ID and Message-ID, several
+    deliveries minutes apart, each answered 250 — a documented sender-side behaviour that only
+    the receiver can absorb). A repeat within the window is answered 250 again but not stored.
+    Messages without a Message-ID are never deduplicated."""
+
+    def __init__(self, path: Path, remember: int):
+        self.path, self.remember, self.data = path, remember, {}
+        try:
+            if path.exists():
+                self.data = json.loads(path.read_text())
+        except Exception:
+            self.data = {}
+
+    def seen_before(self, msgid: str) -> bool:
+        """True if `msgid` was accepted within the window; records it otherwise."""
+        now = time.time()
+        key = msgid.strip().lower()
+        if not key:
+            return False
+        if key in self.data and now - self.data[key] < self.remember:
+            return True
+        self.data[key] = now
+        try:  # opportunistic pruning + write; never raise into the SMTP path
+            self.data = {k: v for k, v in self.data.items() if now - v < self.remember}
+            self.path.write_text(json.dumps(self.data))
+        except Exception:
+            pass
+        return False
+
+
+def message_id_of(content: bytes) -> str:
+    """The first Message-ID header of a raw message (headers only, folded lines joined)."""
+    head = content.split(b"\r\n\r\n", 1)[0] if b"\r\n\r\n" in content else content.split(b"\n\n", 1)[0]
+    text = head.decode("utf-8", "replace").replace("\r\n", "\n")
+    unfolded = text.replace("\n ", " ").replace("\n\t", " ")
+    for line in unfolded.split("\n"):
+        if line.lower().startswith("message-id:"):
+            return line.split(":", 1)[1].strip()
+    return ""
 
 
 class Greylist:
@@ -136,7 +180,8 @@ def log(verdict: str, mail_from: str, rcpt: str, size: int) -> None:
 
 class MailstopHandler:
     def __init__(self, domain: str, users: set, root: Path, max_bytes: int,
-                 max_disk_mb: int, greylist: "Greylist | None", dnsbl: str):
+                 max_disk_mb: int, greylist: "Greylist | None", dnsbl: str,
+                 seen: "SeenMessageIds | None" = None):
         self.domain = domain.lower()
         self.users = {u.lower() for u in users}
         self.catch_all = "*" in self.users
@@ -144,6 +189,7 @@ class MailstopHandler:
         self.max_bytes = max_bytes
         self.max_disk_mb = max_disk_mb
         self.greylist = greylist
+        self.seen = seen
         self.dnsbl = dnsbl
 
     def _local_user(self, address: str):
@@ -180,6 +226,13 @@ class MailstopHandler:
         if size > self.max_bytes:
             log("reject-size", envelope.mail_from or "?", ",".join(envelope.rcpt_tos), size)
             return "552 message too large"
+        if self.seen is not None:
+            msgid = message_id_of(envelope.content or b"")
+            if msgid and self.seen.seen_before(msgid):
+                # Redelivery of an already-accepted message: say 250 (so the sender stops),
+                # store nothing, leave one log line.
+                log("accept-dup", envelope.mail_from or "?", ",".join(envelope.rcpt_tos), size)
+                return "250 Message accepted for delivery"
         for rcpt in envelope.rcpt_tos:
             user = self._local_user(rcpt)
             if user is None:
@@ -204,6 +257,8 @@ def main() -> None:
     ap.add_argument("--max-mb", type=int, default=int(os.environ.get("MAILSTOP_MAX_MB", "25")))
     ap.add_argument("--max-disk-mb", type=int, default=int(os.environ.get("MAILSTOP_MAX_DISK_MB", "500")))
     ap.add_argument("--greylist", default=os.environ.get("MAILSTOP_GREYLIST", "on"))
+    ap.add_argument("--dedup-days", type=float, default=float(os.environ.get("MAILSTOP_DEDUP_DAYS", "7")),
+                    help="remember accepted Message-IDs this many days; 0 = off (default 7)")
     ap.add_argument("--dnsbl", default=os.environ.get("MAILSTOP_DNSBL", ""))
     ap.add_argument("--port", type=int, default=25)
     ap.add_argument("--bind", default="0.0.0.0")
@@ -221,6 +276,7 @@ def main() -> None:
         max_bytes=args.max_mb * 1024 * 1024,
         max_disk_mb=args.max_disk_mb,
         greylist=Greylist(root / ".greylist.json") if args.greylist != "off" else None,
+        seen=SeenMessageIds(root / ".seen_msgids.json", int(args.dedup_days * 86400)) if args.dedup_days > 0 else None,
         dnsbl=args.dnsbl.strip(),
     )
     controller = Controller(handler, hostname=args.bind, port=args.port)
