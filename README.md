@@ -37,8 +37,9 @@ Three layers, all local, all free; content never leaves the machine:
 
 | Layer | Default | What it does |
 |---|---|---|
-| Greylisting | on | unknown (ip,from,to) gets a 450; real MTAs retry in minutes and are remembered; most spam cannons never retry. First mail from a new sender is delayed ~5–15 min (incl. signup verification mails), later mail is instant. `MAILSTOP_GREYLIST=off` to disable. |
+| Greylisting | on | unknown (from,to) gets a 450 (the IP is deliberately not part of the key: big providers retry from rotating pools); real MTAs retry in minutes and are remembered; most spam cannons never retry. First mail from a new sender is delayed ~5–15 min (incl. signup verification mails), later mail is instant. `MAILSTOP_GREYLIST=off` to disable. |
 | DNSBL | off | set `MAILSTOP_DNSBL=zen.spamhaus.org` (free for low volume) to reject connections from listed IPs. Only the caller's IP is looked up, never content. |
+| Redelivery dedup | 7 days | an accepted message's `Message-ID` is remembered (`<root>/.seen_msgids.json`); a later delivery with the same id within the window is answered 250 again but not stored (log verdict `accept-dup`). Absorbs senders that redeliver accepted mail in fresh sessions — Google's DMARC aggregate reports arrive 5–6 times per report otherwise. `MAILSTOP_DEDUP_DAYS=0` to disable. |
 | Disk cap | 500 MB | `MAILSTOP_MAX_DISK_MB` — over the cap new mail gets 452; a spam flood cannot fill the disk. |
 
 Plus `MAILSTOP_MAX_MB` (per-message size, default 25). Expect some residue
