@@ -123,7 +123,11 @@ class Greylist:
     def check(self, ip: str, mail_from: str, rcpt: str) -> bool:
         """True = accept, False = temporary reject (450)."""
         now = time.time()
-        key = f"{ip}|{mail_from.lower()}|{rcpt.lower()}"
+        # Key is (from, to), not (ip, from, to): large providers retry from rotating
+        # pools (Google: three IPs within 30 min), so an IP-keyed triple never matures
+        # and the sender is greylisted forever. The DNSBL layer still sees the IP.
+        # (Field finding on a live deployment, 2026-08-12.)
+        key = f"{mail_from.lower()}|{rcpt.lower()}"
         rec = self.data.get(key)
         if rec is None:
             self.data[key] = {"first": now, "passed": False}
